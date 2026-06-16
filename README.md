@@ -35,7 +35,7 @@ Repository link: `https://github.com/AnubhabBanerjee/CUDA-TopK-Retrieval`
 
 Full deep-dive: `TBA`
 
-Repository link: `TBA`
+Repository link: `https://github.com/AnubhabBanerjee/ILCP-for-Agents`
 
 ## 🧠 System architecture
 
