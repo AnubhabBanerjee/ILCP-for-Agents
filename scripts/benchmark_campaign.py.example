@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""
+Template benchmark driver: copy to benchmark_campaign.py and execute after training a checkpoint.
+
+Copying instead of committing a mutable script name keeps git history clean while still matching the
+series convention that benchmark entrypoints are discoverable under scripts/.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+import time
+from pathlib import Path
+
+import torch
+
+_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+import pandas as pd
+
+from agents.harness import IlcpAgentHarness, ToyHandoffExample, load_ilcp_modules
+from agents.qwen_encoder import QwenContextEncoder
+from compressor.beta_vae import latent_payload_bytes
+from transport.in_process import InProcessTransport
+
+
+def _load_examples(path: Path) -> list[ToyHandoffExample]:
+    """
+    Parse the toy JSON hand-off file into immutable dataclass rows for the harness loops.
+
+    Casting every field to str prevents subtle dtype issues if pandas ever round-trips this file.
+    """
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    out: list[ToyHandoffExample] = []
+    for r in rows:
+        out.append(ToyHandoffExample(context=str(r["context"]), question=str(r["question"]), answer=str(r["answer"])))
+    return out
+
+
+def _percentile(sorted_vals: list[float], p: float) -> float:
+    """
+    Linear-interpolated percentile for small trial counts (>=3 per series requirements).
+
+    Using sorted_vals avoids pulling scipy into the hot path on air-gapped benchmark machines.
+    """
+    if not sorted_vals:
+        return float("nan")
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    f = int(k)
+    c = min(f + 1, len(sorted_vals) - 1)
+    if f == c:
+        return float(sorted_vals[f])
+    d0 = sorted_vals[f] * (c - k)
+    d1 = sorted_vals[c] * (k - f)
+    return float(d0 + d1)
+
+
+def main() -> None:
+    """
+    Run cold vs ILCP branches for N trials, persist CSV/JSON receipts, and print payload byte accounting.
+
+    Wall time is measured outside torch.cuda.synchronize on purpose when CPU offload is enabled because
+    synchronize would undercount host-side staging that still impacts agent hand-off stories.
+    """
+    parser = argparse.ArgumentParser(description="ILCP cold vs warm benchmark campaign (template).")
+    parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--data", type=Path, default=_ROOT / "data" / "toy_handoff.json")
+    parser.add_argument("--checkpoint", type=Path, default=_ROOT / "checkpoints" / "ilcp_stage1.pt")
+    parser.add_argument("--results-dir", type=Path, default=_ROOT / "examples" / "example-run-results")
+    parser.add_argument("--latent-dim", type=int, default=128)
+    parser.add_argument("--vae-hidden", type=int, default=2048)
+    parser.add_argument("--proj-hidden", type=int, default=2048)
+    parser.add_argument("--memory-tokens", type=int, default=4)
+    args = parser.parse_args()
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        torch.cuda.synchronize()
+    else:
+        device = torch.device("cpu")
+
+    examples = _load_examples(args.data)
+    ckpt = None
+    if args.checkpoint.exists():
+        try:
+            ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        except TypeError:
+            ckpt = torch.load(args.checkpoint, map_location="cpu")
+    if ckpt is None:
+        raise SystemExit(f"missing checkpoint: {args.checkpoint} — run scripts/train.py first")
+
+    encoder = QwenContextEncoder(device_map="auto" if torch.cuda.is_available() else None)
+    vae, proj = load_ilcp_modules(
+        encoder=encoder,
+        latent_dim=int(ckpt["meta"].get("latent_dim", args.latent_dim)),
+        vae_hidden=int(ckpt["meta"].get("vae_hidden", args.vae_hidden)),
+        projector_mlp_hidden=int(ckpt["meta"].get("proj_hidden", args.proj_hidden)),
+        num_memory_tokens=int(ckpt["meta"].get("memory_tokens", args.memory_tokens)),
+        checkpoint=ckpt,
+        device=device,
+    )
+    transport = InProcessTransport(device="cpu")
+    harness = IlcpAgentHarness(encoder=encoder, vae=vae, projector=proj, transport=transport)
+
+    rows: list[dict] = []
+    for trial in range(args.trials):
+        for ex in examples:
+            cold_text, cold_dt = harness.run_cold_baseline(ex)
+            ilcp_text, ilcp_dt = harness.run_ilcp_branch(ex)
+            rows.append(
+                {
+                    "trial": trial,
+                    "example": ex.question[:80],
+                    "branch": "cold",
+                    "latency_s": cold_dt,
+                    "exact_match": harness.quality_exact_match(ex, cold_text),
+                }
+            )
+            rows.append(
+                {
+                    "trial": trial,
+                    "example": ex.question[:80],
+                    "branch": "ilcp",
+                    "latency_s": ilcp_dt,
+                    "exact_match": harness.quality_exact_match(ex, ilcp_text),
+                }
+            )
+
+    args.results_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = args.results_dir / "all_trials.csv"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+
+    cold_lat = sorted([r["latency_s"] for r in rows if r["branch"] == "cold"])
+    ilcp_lat = sorted([r["latency_s"] for r in rows if r["branch"] == "ilcp"])
+
+    best = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "trials": args.trials,
+        "cold_latency_s": {
+            "mean": float(statistics.mean(cold_lat)) if cold_lat else float("nan"),
+            "p50": _percentile(cold_lat, 50),
+            "p95": _percentile(cold_lat, 95),
+            "p99": _percentile(cold_lat, 99),
+        },
+        "ilcp_latency_s": {
+            "mean": float(statistics.mean(ilcp_lat)) if ilcp_lat else float("nan"),
+            "p50": _percentile(ilcp_lat, 50),
+            "p95": _percentile(ilcp_lat, 95),
+            "p99": _percentile(ilcp_lat, 99),
+        },
+        "payload_bytes_z_float32": latent_payload_bytes(
+            int(ckpt["meta"].get("latent_dim", args.latent_dim)), torch.float32
+        ),
+        "csv": str(csv_path),
+    }
+    (args.results_dir / "best_run.json").write_text(json.dumps(best, indent=2), encoding="utf-8")
+    (args.results_dir / "results_narrative.txt").write_text(
+        "This narrative file should summarize the run in prose after you inspect plots and CSVs.\n",
+        encoding="utf-8",
+    )
+    print(f"wrote {csv_path} and best_run.json")
+
+
+if __name__ == "__main__":
+    main()

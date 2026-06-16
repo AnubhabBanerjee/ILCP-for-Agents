@@ -1,0 +1,27 @@
+[
+  {
+    "context": "The ILCP blog demo uses a toy corpus so receipts stay small. The magic number for this item is forty-two.",
+    "question": "What is the magic number mentioned in the context?",
+    "answer": "forty-two"
+  },
+  {
+    "context": "Agent A summarized telemetry. The release codename is aurora-7 and must be quoted verbatim.",
+    "question": "What is the release codename?",
+    "answer": "aurora-7"
+  },
+  {
+    "context": "The hand-off payload is measured in bytes after serialization. For float32 latents of dimension 128, the payload is 512 bytes.",
+    "question": "How many bytes is a float32 latent of dimension 128?",
+    "answer": "512 bytes"
+  },
+  {
+    "context": "SwarmKV (Part 1) targets redundant KV prefill fan-out. CUDA-TopK (Part 3) targets GPU-resident retrieval.",
+    "question": "Which part targets redundant KV prefill fan-out?",
+    "answer": "SwarmKV"
+  },
+  {
+    "context": "The canonical series GPU is an NVIDIA GTX 1080 with 8 GB of memory and Pascal sm_61.",
+    "question": "Which GPU family is named as the canonical baseline?",
+    "answer": "GTX 1080"
+  }
+]
