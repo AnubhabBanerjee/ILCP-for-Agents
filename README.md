@@ -1,7 +1,7 @@
 **Copyright (c) 2026 Anubhab Banerjee (AnubhabBanerjee/ilcp-for-agents)** **All rights reserved. No part of this repository may be used, redistributed, or modified in any form or by any means without the prior written permission of the author.**
 
 ---
- 
+<img width="1536" height="1024" alt="github-social-preview" src="https://github.com/user-attachments/assets/9849b743-2f6f-4147-a0e4-8adfb0b2c287" /> 
 
 ---
 
